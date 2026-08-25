@@ -120,3 +120,7 @@ and register it with a name in `src/providers/visionProvider.js`'s `loadProvider
 ## License
 
 MIT
+
+---
+
+Developed by [Kinect.PRO](https://kinect.pro)
