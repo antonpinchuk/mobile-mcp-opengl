@@ -1,0 +1,33 @@
+{
+  "name": "mobile-mcp-opengl",
+  "version": "0.1.0",
+  "description": "MCP server for testing OpenGL/Unity/Cocos2d-x/Unreal Android apps, where the UI lives inside a single opaque GL surface and adb uiautomator/accessibility-tree inspection cannot see into it.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "src/server.js",
+  "bin": {
+    "mobile-mcp-opengl": "src/server.js"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "zod": "^3.23.8"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "android",
+    "opengl",
+    "cocos2d-x",
+    "unity",
+    "unreal",
+    "adb",
+    "mobile-testing",
+    "vision"
+  ]
+}
