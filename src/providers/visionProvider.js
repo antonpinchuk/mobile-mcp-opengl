@@ -20,11 +20,26 @@ function loadProvider() {
   switch (name) {
     case 'runware':
       return require('./runwareProvider');
+    case 'openai':
+      // Runware's general chat/completions endpoint by default (Gemini,
+      // GPT-5.6, Claude, ...) - NOT the same model registry as `runware`'s
+      // imageCaption task. Point OPENAI_BASE_URL at api.openai.com instead
+      // for genuinely OpenAI-hosted inference. See openaiProvider.js.
+      return require('./openaiProvider');
+    case 'openrouter':
+      // NOT live-tested (see openrouterProvider.js) - written from
+      // OpenRouter's published docs, needs a funded OpenRouter account this
+      // project's agent doesn't have. Reports are welcome if you try it.
+      return require('./openrouterProvider');
     case 'openai-compatible':
+      // Generic escape hatch for any other OpenAI-vision-compatible
+      // endpoint (a local Ollama/LM Studio server, Groq, Together.ai, or
+      // OpenRouter itself if you'd rather configure it by hand instead of
+      // using the dedicated `openrouter` provider above).
       return require('./openaiCompatibleProvider');
     default:
       throw new Error(
-        `Unknown VISION_PROVIDER "${name}". Built-in options: "runware", "openai-compatible". ` +
+        `Unknown VISION_PROVIDER "${name}". Built-in options: "runware", "openai", "openrouter", "openai-compatible". ` +
         `To add your own, create src/providers/<name>Provider.js exporting an async ask(imageBuffer, mimeType, question) ` +
         `function, then add a case for it in src/providers/visionProvider.js loadProvider().`
       );

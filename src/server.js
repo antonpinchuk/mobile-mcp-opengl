@@ -42,6 +42,7 @@ require('./loadEnv')(); // reads .env next to this package, see loadEnv.js
 const adb = require('./adb');
 const { loadProvider } = require('./providers/visionProvider');
 const costTracker = require('./costTracker');
+const screenshotStore = require('./screenshotStore');
 
 const provider = loadProvider();
 
@@ -56,9 +57,13 @@ const SHORT_ANSWER_SUFFIX =
 
 async function askAboutImage(png, question) {
   costTracker.assertUnderCap();
+  // Saved BEFORE the vision call so the file exists even if the provider
+  // errors out or returns something unusable - the screenshot itself is
+  // still worth having in that case.
+  const screenshotPath = screenshotStore.save(png);
   const result = await provider.ask(png, 'image/png', question + SHORT_ANSWER_SUFFIX);
   const { alert, todayTotal } = costTracker.record({ question, answer: result.text, costUsd: result.costUsd });
-  return { ...result, alert, todayTotal };
+  return { ...result, alert, todayTotal, screenshotPath };
 }
 
 async function askAboutScreen(question) {
@@ -68,6 +73,13 @@ async function askAboutScreen(question) {
 
 function formatAnswer(question, result) {
   const parts = [result.text];
+  if (result.screenshotPath) {
+    // The model's answer is not always trustworthy (see README "Vision
+    // provider accuracy") - the calling agent can Read this file directly
+    // to check, and the human can open it too. Not cleaned up automatically
+    // - see screenshotStore.js and README "Screenshot files".
+    parts.push(`\n(screenshot: ${result.screenshotPath})`);
+  }
   if (typeof result.costUsd === 'number') {
     parts.push(`\n(cost: $${result.costUsd.toFixed(4)}, today total: $${result.todayTotal.toFixed(4)})`);
   }
@@ -125,7 +137,11 @@ server.registerTool(
     title: 'Swipe/drag + screenshot + ask',
     description:
       'Swipe (or drag, for drag-and-drop UIs) from (x1, y1) to (x2, y2), wait briefly, take a screenshot, and ask a short ' +
-      'question about the result - all in one call.',
+      'question about the result - all in one call. Implemented as a real continuous touch (DOWN, then paced MOVE steps, ' +
+      'then UP - see README "Drag/hold support"), not a single `adb shell input swipe` call, so this now works against ' +
+      'custom touch-based drag handlers that ignored the old single-shot gesture. For a drag that needs to PAUSE at the ' +
+      'destination before releasing (e.g. to screenshot mid-hold, or to continue on to a second destination), use ' +
+      'swipe_hold_and_ask instead - this tool always releases at (x2, y2).',
     inputSchema: {
       x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number(),
       durationMs: z.number().optional().describe('Swipe duration in ms (default 300; use longer for drag-and-drop hold gestures).'),
@@ -138,6 +154,187 @@ server.registerTool(
     await new Promise((r) => setTimeout(r, waitMs ?? 500));
     const result = await askAboutScreen(question);
     return { content: [{ type: 'text', text: formatAnswer(question, result) }] };
+  }
+);
+
+server.registerTool(
+  'hold_and_ask',
+  {
+    title: 'Press down + hold (no movement) + screenshot + ask',
+    description:
+      'Press down at (x, y) and HOLD - the finger stays down, no UP is sent - wait briefly, take a screenshot, and ask a ' +
+      'short question about the result. Unlike long_press_and_ask (which presses AND releases before screenshotting), this ' +
+      'leaves the touch held so a later swipe_hold_and_ask/release_and_ask call can continue or end the SAME physical touch. ' +
+      'Fails if a touch is already held - release_and_ask it first, or continue it with swipe_hold_and_ask.',
+    inputSchema: {
+      x: z.number().describe('X coordinate in device pixels.'),
+      y: z.number().describe('Y coordinate in device pixels.'),
+      question: z.string().describe('A short, specific question about the screen while holding.'),
+      waitMs: z.number().optional().describe('Milliseconds to wait after pressing down before screenshotting (default 500).'),
+    },
+  },
+  async ({ x, y, question, waitMs }) => {
+    await adb.touchDown(x, y);
+    await new Promise((r) => setTimeout(r, waitMs ?? 500));
+    const result = await askAboutScreen(question);
+    return { content: [{ type: 'text', text: formatAnswer(question, result) }] };
+  }
+);
+
+server.registerTool(
+  'swipe_hold_and_ask',
+  {
+    title: 'Drag/continue-drag + HOLD at the end + screenshot + ask',
+    description:
+      'Drag from (x1, y1) to (x2, y2) over durationMs and HOLD at the end - no UP is sent, the finger stays down - wait ' +
+      'briefly, take a screenshot, and ask a short question about the result. This is the composable building block for ' +
+      'multi-step drag gestures: if a touch is ALREADY held (from a previous swipe_hold_and_ask or hold_and_ask call in ' +
+      'this session), x1/y1 are ignored and the drag continues from wherever that touch currently is - the app sees one ' +
+      'unbroken finger-down stream across both tool calls, not a new tap. If nothing is held, x1/y1 are required and this ' +
+      'starts a fresh touch. Chain calls to this tool (optionally ending with release_and_ask) to test multi-leg drag ' +
+      'gestures a single swipe_and_ask cannot express, e.g. "drag piece toward a drop zone, hesitate over it, then drag ' +
+      'further to a different zone before releasing."',
+    inputSchema: {
+      x1: z.number().optional().describe('Start X - required only if no touch is currently held (see description).'),
+      y1: z.number().optional().describe('Start Y - required only if no touch is currently held.'),
+      x2: z.number().describe('End X - where the touch will be held after this call.'),
+      y2: z.number().describe('End Y - where the touch will be held after this call.'),
+      durationMs: z.number().optional().describe('Drag duration in ms (default 300).'),
+      question: z.string().describe('A short, specific question about the screen while holding at (x2, y2).'),
+      waitMs: z.number().optional().describe('Milliseconds to wait after reaching (x2, y2) before screenshotting (default 500).'),
+    },
+  },
+  async ({ x1, y1, x2, y2, durationMs, question, waitMs }) => {
+    if (adb.isHeld()) {
+      await adb.continueDrag(x2, y2, durationMs ?? 300, /* release */ false);
+    } else {
+      if (x1 === undefined || y1 === undefined) {
+        throw new Error('swipe_hold_and_ask: no touch is currently held, so x1 and y1 are required to start one.');
+      }
+      await adb.drag(x1, y1, x2, y2, durationMs ?? 300, /* release */ false);
+    }
+    await new Promise((r) => setTimeout(r, waitMs ?? 500));
+    const result = await askAboutScreen(question);
+    return { content: [{ type: 'text', text: formatAnswer(question, result) }] };
+  }
+);
+
+server.registerTool(
+  'release_and_ask',
+  {
+    title: 'Release the currently-held touch + screenshot + ask',
+    description:
+      'Send UP wherever the touch currently held by hold_and_ask or swipe_hold_and_ask is, ending that gesture, then wait ' +
+      'briefly, take a screenshot, and ask a short question about the result (e.g. "did the piece snap into the slot?"). ' +
+      'Fails with a clear error if nothing is currently held - this is the end of a hold/drag chain, not a standalone tool.',
+    inputSchema: {
+      question: z.string().describe('A short, specific question about the screen after releasing.'),
+      waitMs: z.number().optional().describe('Milliseconds to wait after releasing before screenshotting (default 500).'),
+    },
+  },
+  async ({ question, waitMs }) => {
+    await adb.touchUp();
+    await new Promise((r) => setTimeout(r, waitMs ?? 500));
+    const result = await askAboutScreen(question);
+    return { content: [{ type: 'text', text: formatAnswer(question, result) }] };
+  }
+);
+
+// --- No-vision-call primitives -------------------------------------------
+//
+// Every tool above bundles an action with a screenshot+vision-question round
+// trip, which is the point for most calls (see "Why combined action+observe
+// tools" at the top of this file) - but it's needlessly expensive for the
+// tail end of a gesture you've already screenshotted enough of. The
+// recurring case: `record_swipe_and_ask` or a `swipe_hold_and_ask` chain
+// already answered what you needed mid-drag, and all that's left is to end
+// the physical touch cleanly - `release_and_ask` would force one more paid
+// vision call just to do that. These three primitives are the tap/hold/
+// release actions with no screenshot and no vision call at all.
+
+server.registerTool(
+  'tap',
+  {
+    title: 'Tap (x, y) - no screenshot, no vision call',
+    description:
+      'A plain tap at (x, y): DOWN then UP, no screenshot and no vision call. Use this when you don\'t need to observe the ' +
+      'result right now (e.g. dismissing something you already confirmed via a prior screenshot, or a setup tap before a ' +
+      'sequence you\'ll check at the end) - use tap_and_ask instead when you need to see what happened.',
+    inputSchema: {
+      x: z.number().describe('X coordinate in device pixels.'),
+      y: z.number().describe('Y coordinate in device pixels.'),
+    },
+  },
+  async ({ x, y }) => {
+    await adb.tap(x, y);
+    return { content: [{ type: 'text', text: 'tapped' }] };
+  }
+);
+
+server.registerTool(
+  'hold',
+  {
+    title: 'Press down + hold - no screenshot, no vision call',
+    description:
+      'Press down at (x, y) and HOLD - no UP is sent, no screenshot, no vision call. The quiet counterpart to hold_and_ask: ' +
+      'use this when you\'ll check the result with a separate screenshot_ask/record_swipe_and_ask call, or don\'t need to ' +
+      'observe this particular step. Leaves the touch held for a following swipe_hold_and_ask/swipe_hold/release_and_ask/' +
+      'release. Fails if a touch is already held - release it first, or continue it with swipe_hold.',
+    inputSchema: {
+      x: z.number().describe('X coordinate in device pixels.'),
+      y: z.number().describe('Y coordinate in device pixels.'),
+    },
+  },
+  async ({ x, y }) => {
+    await adb.touchDown(x, y);
+    return { content: [{ type: 'text', text: 'held' }] };
+  }
+);
+
+server.registerTool(
+  'swipe_hold',
+  {
+    title: 'Drag/continue-drag + hold at the end - no screenshot, no vision call',
+    description:
+      'The quiet counterpart to swipe_hold_and_ask: drag from (x1, y1) to (x2, y2) over durationMs and HOLD at the end - no ' +
+      'UP is sent, no screenshot, no vision call. If a touch is ALREADY held, x1/y1 are ignored and the drag continues from ' +
+      'wherever that touch currently is (same composability as swipe_hold_and_ask). Use this for legs of a multi-step ' +
+      'gesture you don\'t need to look at, saving a paid vision call for the leg(s) that matter.',
+    inputSchema: {
+      x1: z.number().optional().describe('Start X - required only if no touch is currently held.'),
+      y1: z.number().optional().describe('Start Y - required only if no touch is currently held.'),
+      x2: z.number().describe('End X - where the touch will be held after this call.'),
+      y2: z.number().describe('End Y - where the touch will be held after this call.'),
+      durationMs: z.number().optional().describe('Drag duration in ms (default 300).'),
+    },
+  },
+  async ({ x1, y1, x2, y2, durationMs }) => {
+    if (adb.isHeld()) {
+      await adb.continueDrag(x2, y2, durationMs ?? 300, /* release */ false);
+    } else {
+      if (x1 === undefined || y1 === undefined) {
+        throw new Error('swipe_hold: no touch is currently held, so x1 and y1 are required to start one.');
+      }
+      await adb.drag(x1, y1, x2, y2, durationMs ?? 300, /* release */ false);
+    }
+    return { content: [{ type: 'text', text: 'held' }] };
+  }
+);
+
+server.registerTool(
+  'release',
+  {
+    title: 'Release the currently-held touch - no screenshot, no vision call',
+    description:
+      'Send UP wherever the touch currently held by hold/swipe_hold/hold_and_ask/swipe_hold_and_ask is - no screenshot, no ' +
+      'vision call. Use this to cleanly end a gesture whose outcome you already confirmed with an earlier screenshot (e.g. ' +
+      'after record_swipe_and_ask already answered what you needed mid-drag) instead of paying for release_and_ask\'s extra ' +
+      'vision call. Fails with a clear error if nothing is currently held.',
+    inputSchema: {},
+  },
+  async () => {
+    await adb.touchUp();
+    return { content: [{ type: 'text', text: 'released' }] };
   }
 );
 
@@ -215,11 +412,71 @@ server.registerTool(
       answers.push({ frame: i + 1, tMs: i * intervalMs, ...result });
     }
 
-    const lines = answers.map((a) => `Frame ${a.frame} (t=${a.tMs}ms): ${a.text}`);
+    const lines = answers.map((a) => `Frame ${a.frame} (t=${a.tMs}ms): ${a.text} (screenshot: ${a.screenshotPath})`);
     const totalCost = answers.reduce((sum, a) => sum + (a.costUsd || 0), 0);
     lines.push(`\n(sequence cost: $${totalCost.toFixed(4)}, today total: $${answers[answers.length - 1].todayTotal.toFixed(4)})`);
     const alerts = answers.filter((a) => a.alert).map((a) => `Frame ${a.frame}: ${a.alert}`);
     if (alerts.length) lines.push(`\n[COST ALERT]\n${alerts.join('\n')}`);
+
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
+  }
+);
+
+server.registerTool(
+  'record_swipe_and_ask',
+  {
+    title: 'Record a timed screenshot sequence DURING a swipe/drag + ask about each frame',
+    description:
+      'Like record_and_ask, but for watching what happens WHILE a drag is in flight rather than only before/after it - e.g. ' +
+      '"does the dragged piece follow the finger smoothly?", "does a drop-zone highlight turn on partway through the drag, ' +
+      'before the finger arrives?", "does anything visually lag or stutter mid-drag?". Starts a continuous drag from ' +
+      '(x1, y1) to (x2, y2) over durationMs (same continuous-touch implementation as swipe_and_ask - see README "Drag/hold ' +
+      'support"), and WHILE that drag is still running, captures `frameCount` screenshots spaced `intervalMs` apart - the ' +
+      'sampling interval is independent of durationMs, so you can capture a coarser or finer timeline than the drag\'s own ' +
+      'MOVE cadence. If frameCount*intervalMs exceeds durationMs, the drag finishes early and the remaining frames capture ' +
+      'the held/released end state rather than genuine mid-drag frames - keep frameCount*intervalMs at or below durationMs ' +
+      'if you specifically need every frame to be mid-gesture. Ends with release (UP) at (x2, y2) unless holdAtEnd is true, ' +
+      'in which case the touch is left down afterward for a following swipe_hold_and_ask/release_and_ask to continue or end.',
+    inputSchema: {
+      x1: z.number(), y1: z.number(), x2: z.number(), y2: z.number(),
+      durationMs: z.number().describe('Total drag duration in ms - frames are captured while this is still in progress.'),
+      frameCount: z.number().min(2).max(8).describe('How many screenshots to take during the drag, spaced intervalMs apart (2-8).'),
+      intervalMs: z.number().describe('Milliseconds between each screenshot (independent of durationMs - see description).'),
+      holdAtEnd: z.boolean().optional().describe('If true, leave the touch held at (x2, y2) instead of releasing (default false).'),
+      question: z.string().describe('The same short question asked about every captured frame.'),
+    },
+  },
+  async ({ x1, y1, x2, y2, durationMs, frameCount, intervalMs, holdAtEnd, question }) => {
+    if (adb.isHeld()) {
+      throw new Error('record_swipe_and_ask: a touch is already held - release it first (release_and_ask) or this would be read as a second finger, not this drag\'s start.');
+    }
+
+    // Fire the drag and the frame-capture loop concurrently - the whole point
+    // of this tool is sampling screenshots WHILE the drag is in flight, not
+    // before/after it like record_and_ask's action+then-record shape.
+    const dragPromise = adb.drag(x1, y1, x2, y2, durationMs, /* release */ !holdAtEnd);
+
+    const frames = [];
+    for (let i = 0; i < frameCount; i++) {
+      if (i > 0) await new Promise((r) => setTimeout(r, intervalMs));
+      frames.push(await adb.screenshotPng());
+    }
+
+    await dragPromise; // make sure the drag (and its release/hold) has actually finished before returning
+
+    const answers = [];
+    for (let i = 0; i < frames.length; i++) {
+      const framedQuestion = `This is frame ${i + 1} of ${frameCount}, captured ${i * intervalMs}ms into a ${durationMs}ms drag from (${x1},${y1}) to (${x2},${y2}). ${question}`;
+      const result = await askAboutImage(frames[i], framedQuestion);
+      answers.push({ frame: i + 1, tMs: i * intervalMs, ...result });
+    }
+
+    const lines = answers.map((a) => `Frame ${a.frame} (t=${a.tMs}ms): ${a.text} (screenshot: ${a.screenshotPath})`);
+    const totalCost = answers.reduce((sum, a) => sum + (a.costUsd || 0), 0);
+    lines.push(`\n(sequence cost: $${totalCost.toFixed(4)}, today total: $${answers[answers.length - 1].todayTotal.toFixed(4)})`);
+    const alerts = answers.filter((a) => a.alert).map((a) => `Frame ${a.frame}: ${a.alert}`);
+    if (alerts.length) lines.push(`\n[COST ALERT]\n${alerts.join('\n')}`);
+    if (holdAtEnd) lines.push('\n(touch held at end point - call swipe_hold_and_ask or release_and_ask next)');
 
     return { content: [{ type: 'text', text: lines.join('\n') }] };
   }

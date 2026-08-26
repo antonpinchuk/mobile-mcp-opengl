@@ -7,7 +7,11 @@
 const fs = require('fs');
 const path = require('path');
 
-const LOG_PATH = process.env.VISION_LOG_PATH || path.join(process.cwd(), '.vision-log.jsonl');
+// Defaults into .data/ (gitignored, same directory screenshotStore.js uses)
+// rather than process.cwd() - the old default put the log wherever the MCP
+// client happened to launch the server from, which for some clients isn't
+// this package's own directory at all.
+const LOG_PATH = process.env.VISION_LOG_PATH || path.join(__dirname, '..', '.data', 'vision-log.jsonl');
 const ALERT_USD = parseFloat(process.env.VISION_ALERT_USD || '0.0015');
 const SESSION_CAP_USD = parseFloat(process.env.VISION_SESSION_CAP_USD || '2.00');
 
