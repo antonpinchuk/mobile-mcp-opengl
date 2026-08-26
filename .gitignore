@@ -1,7 +1,6 @@
-node_modules/
-.env
-.vision-log.jsonl
-*.iml
+.data/
 .idea/
 .DS_Store
-.data/
+node_modules/
+.env
+*.iml

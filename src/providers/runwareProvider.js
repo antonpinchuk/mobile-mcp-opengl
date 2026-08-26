@@ -10,11 +10,12 @@
 // Runware's own broader catalog) come back `invalidCaptionModel`. The two
 // confirmed-working ones as of this writing, found by trial against the
 // live API (see README "Switching models" for the comparison methodology):
-//   - runware:150@2 (default) - gave correct/coherent answers in every
-//     comparison run against runware:152@2 on this project's own test
-//     screenshots (correctly identified a UI element 152@2 missed
-//     entirely, and never produced the token-repetition garbage 152@2 did
-//     on one test). Same price as 152@2.
+//   - runware:150@2 (LLaVA-1.6-Mistral-7B) (default) - gave correct/coherent
+//     answers in every comparison run against runware:152@2 on this
+//     project's own test screenshots (correctly identified a UI element
+//     152@2 missed entirely, and never produced the token-repetition
+//     garbage 152@2 did on one test). A different model, not a config
+//     tweak of 152@2 - same price though.
 //   - runware:152@2 (Qwen2.5-VL-7B-Instruct) - the older default. Kept
 //     available via RUNWARE_VISION_MODEL for anyone who wants to reproduce
 //     the comparison, but not recommended as a default anymore.
